@@ -1,0 +1,76 @@
+@import "tailwindcss";
+
+:root {
+  --clinical-bg: #F7F8FA;
+  --clinical-card: #FFFFFF;
+  --clinical-border: #E2E6EA;
+  --clinical-text: #1A1D23;
+  --clinical-secondary: #6B7280;
+  --clinical-primary: #2563EB;
+}
+
+.dark {
+  --clinical-bg: #121212;
+  --clinical-card: #1C1C1C;
+  --clinical-border: #2D2D2D;
+  --clinical-text: #F5F5F5;
+  --clinical-secondary: #9CA3AF;
+  --clinical-primary: #3B82F6;
+}
+
+@theme {
+  --font-sans: "DM Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+
+  --color-clinical-bg: var(--clinical-bg);
+  --color-clinical-card: var(--clinical-card);
+  --color-clinical-border: var(--clinical-border);
+  --color-clinical-text: var(--clinical-text);
+  --color-clinical-secondary: var(--clinical-secondary);
+  --color-clinical-primary: var(--clinical-primary);
+
+  --color-data-glucose: #2563EB;
+  --color-data-target: #10B981;
+  --color-data-hypo: #EF4444;
+  --color-data-hyper: #F59E0B;
+  --color-data-insulin: #7C3AED;
+  --color-data-hr: #F43F5E;
+  --color-data-pace: #059669;
+  --color-data-load: #D97706;
+}
+
+@layer base {
+  body {
+    @apply font-sans text-clinical-text antialiased bg-clinical-bg;
+  }
+}
+
+/* Custom discreet scrollbar */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--clinical-border);
+  border-radius: 10px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--clinical-secondary);
+}
+
+/* For Firefox */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--clinical-border) transparent;
+}
+
+
+.scrollbar-stable {
+  scrollbar-gutter: stable;
+}
