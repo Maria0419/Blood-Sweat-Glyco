@@ -50,7 +50,7 @@ function SettingsModal({ isOpen, onClose, onWorkoutsUpdated, isDarkMode, setIsDa
   const [clSyncing, setClSyncing] = useState(false);
   const [clError, setClError] = useState(null);
 
-  const colors = ['#EF4444', '#F97316', '#F59E0B', '#10B981', '#3B82F6', '#6366F1', '#8B5CF6', '#D946EF'];
+  const colors = ['#EF4444', '#F97316', '#EAB308', '#22C55E', '#06B6D4', '#3B82F6', '#A855F7', '#EC4899', '#A16207', '#64748B'];
   const [editingTagId, setEditingTagId] = useState(null);
   const [editingTagLabel, setEditingTagLabel] = useState('');
   const [editingTagColor, setEditingTagColor] = useState('');
@@ -70,12 +70,13 @@ function SettingsModal({ isOpen, onClose, onWorkoutsUpdated, isDarkMode, setIsDa
     setTagError(null);
   };
 
-  const saveEditTag = async () => {
+  const saveEditTag = async (forcedColor = null) => {
     if (!editingTagLabel.trim()) {
       setTagError('O nome da tag não pode ser vazio.');
       return;
     }
     
+    const colorToSave = forcedColor || editingTagColor;
     const newLabel = editingTagLabel.trim().toLowerCase();
     const isDuplicate = tags.some(t => 
       t.id !== editingTagId && 
@@ -89,8 +90,11 @@ function SettingsModal({ isOpen, onClose, onWorkoutsUpdated, isDarkMode, setIsDa
     
     try {
       setTagError(null);
-      await onAddTag(editingTagLabel.trim(), editingTagColor, editingTagId);
-      setEditingTagId(null);
+      await onAddTag(editingTagLabel.trim(), colorToSave, editingTagId);
+      // Only close if we are not just changing color (forcedColor is null when finishing edit)
+      if (!forcedColor) {
+        setEditingTagId(null);
+      }
     } catch (e) {
       console.error(e);
       setTagError('Erro ao salvar tag.');
@@ -266,47 +270,68 @@ function SettingsModal({ isOpen, onClose, onWorkoutsUpdated, isDarkMode, setIsDa
                   tags.filter(t => t && t.id).map(tag => (
                     <div key={tag.id} className="p-3 bg-clinical-bg border border-clinical-border rounded-xl flex items-center justify-between group transition-all">
                       {editingTagId === tag.id ? (
-                        <div className="flex flex-col gap-2 w-full">
-                          <input
-                            type="text"
-                            value={editingTagLabel || ''}
-                            onChange={(e) => {
-                              setEditingTagLabel(e.target.value);
-                              setTagError(null);
-                            }}
-                            onKeyDown={handleEditTagKeyDown}
-                            onBlur={saveEditTag}
-                            className={`w-full px-2 py-1.5 bg-clinical-card border rounded-lg text-sm font-bold focus:outline-none focus:ring-2 ${
-                              tagError ? 'border-red-500 focus:ring-red-500' : 'border-clinical-border focus:ring-amber-500'
-                            }`}
-                            autoFocus
-                          />
+                        <div className="flex flex-col gap-3 w-full">
+                          <div className="flex items-center gap-3">
+                            <span 
+                              className="text-xs font-bold px-2 py-1 rounded text-white shrink-0 shadow-sm" 
+                              style={{ backgroundColor: editingTagColor }}
+                            >
+                              {editingTagLabel || '...'}
+                            </span>
+                            <input
+                              type="text"
+                              value={editingTagLabel}
+                              onChange={(e) => {
+                                setEditingTagLabel(e.target.value);
+                                setTagError(null);
+                              }}
+                              onKeyDown={handleEditTagKeyDown}
+                              placeholder="Nome da tag"
+                              className={`flex-1 min-w-0 px-2 py-1.5 bg-clinical-card border rounded-lg text-sm font-bold focus:outline-none focus:ring-2 ${
+                                tagError ? 'border-red-500 focus:ring-red-500' : 'border-clinical-border focus:ring-amber-500'
+                              }`}
+                              autoFocus
+                            />
+                          </div>
+                          
                           {tagError && (
                             <p className="text-xs text-red-500 font-semibold">{tagError}</p>
                           )}
-                          <div className="flex gap-1.5 flex-wrap">
-                            {colors.map(color => (
-                              <button
-                                key={color}
-                                onClick={() => setEditingTagColor(color)}
-                                className={`w-5 h-5 rounded-full border-2 transition-all ${editingTagColor === color ? 'border-white shadow-sm ring-1 ring-clinical-border' : 'border-transparent hover:scale-110'}`}
-                                style={{ backgroundColor: color }}
-                              />
-                            ))}
+                          
+                          <div className="flex gap-1.5 flex-wrap bg-clinical-card/50 p-2 rounded-lg border border-clinical-border/50">
+                            {colors.map(color => {
+                              const isSelected = editingTagColor === color;
+                              return (
+                                <button
+                                  key={color}
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setEditingTagColor(color);
+                                    saveEditTag(color);
+                                  }}
+                                  className={`w-6 h-6 rounded-full border-2 transition-all ${isSelected ? 'border-white ring-2 ring-clinical-primary scale-110 shadow-md' : 'border-transparent hover:scale-110 opacity-70 hover:opacity-100'}`}
+                                  style={{ backgroundColor: color }}
+                                />
+                              );
+                            })}
                           </div>
-                          <div className="flex gap-2 justify-end mt-1">
-                            <button onClick={cancelEditTag} className="text-xs font-bold text-clinical-secondary hover:text-clinical-text px-2 py-1">Cancelar</button>
+
+                          <div className="flex gap-2 justify-end">
+                            <button onClick={cancelEditTag} className="text-xs font-bold text-clinical-secondary hover:text-clinical-text px-3 py-1.5 rounded-lg hover:bg-clinical-card transition-colors">Cancelar</button>
+                            <button onClick={() => saveEditTag()} className="text-xs font-bold text-white bg-clinical-primary px-4 py-1.5 rounded-lg shadow-sm hover:opacity-90 transition-opacity">Salvar Nome</button>
                           </div>
                         </div>
                       ) : (
-                        <>
+                        <div className="flex items-center justify-between group w-full min-w-0">
                           <span 
-                            className="text-xs font-bold px-2 py-1 rounded text-white" 
+                            className="text-xs font-bold px-2 py-1 rounded text-white inline-block max-w-[200px] truncate align-bottom" 
                             style={{ backgroundColor: tag.color || '#F59E0B' }}
+                            title={tag.label}
                           >
                             {tag.label || 'Tag Sem Nome'}
                           </span>
-                          <div className="flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                          <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
                             <button 
                               onClick={() => startEditTag(tag)}
                               className="p-1.5 text-clinical-secondary hover:text-amber-500 hover:bg-clinical-card rounded-md transition-colors"
@@ -326,7 +351,7 @@ function SettingsModal({ isOpen, onClose, onWorkoutsUpdated, isDarkMode, setIsDa
                               <Trash2 size={14} />
                             </button>
                           </div>
-                        </>
+                        </div>
                       )}
                     </div>
                   ))
