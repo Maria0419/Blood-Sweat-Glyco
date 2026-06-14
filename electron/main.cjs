@@ -9,6 +9,10 @@ const SERVICE_NAME = 'BloodSweatGlyco';
 const ACCOUNT_GARMIN = 'GarminConnect';
 
 let gcClient = null;
+let mainWindow = null;
+const printJobs = new Map();
+
+app.disableHardwareAcceleration();
 
 // Configuração dos Diretórios de Dados (Otimizados)
 const userDataPath = app.getPath('userData');
@@ -285,13 +289,585 @@ function mergeAndSaveFullCarelinkHistory(newData) {
   return merged;
 }
 
+const PRINT_TIMEZONE = 'America/Sao_Paulo';
+const printTimeFormatter = new Intl.DateTimeFormat('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: PRINT_TIMEZONE });
+const printDayMonthFormatter = new Intl.DateTimeFormat('pt-BR', { day: '2-digit', month: 'long', timeZone: PRINT_TIMEZONE });
+const printMonthYearFormatter = new Intl.DateTimeFormat('pt-BR', { month: 'long', year: 'numeric', timeZone: PRINT_TIMEZONE });
+const printDateTimeFormatter = new Intl.DateTimeFormat('pt-BR', {
+  day: '2-digit',
+  month: '2-digit',
+  year: 'numeric',
+  hour: '2-digit',
+  minute: '2-digit',
+  timeZone: PRINT_TIMEZONE,
+});
+
+function toDate(value) {
+  return value instanceof Date ? value : new Date(value);
+}
+
+function formatTimeSPMain(value) {
+  return printTimeFormatter.format(toDate(value));
+}
+
+function formatDayMonthSPMain(value) {
+  return printDayMonthFormatter.format(toDate(value));
+}
+
+function formatMonthYearSPMain(value) {
+  return printMonthYearFormatter.format(toDate(value));
+}
+
+function formatDateTimeSPMain(value) {
+  return printDateTimeFormatter.format(toDate(value));
+}
+
+function formatMetricValueMain(value, suffix = '') {
+  if (value === null || value === undefined || value === '' || Number.isNaN(value)) return '—';
+  return `${value}${suffix}`;
+}
+
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function formatSportLabel(sport) {
+  const labels = {
+    running: 'Corrida',
+    trail_running: 'Corrida em Trilha',
+    track_running: 'Corrida de Pista',
+    treadmill_running: 'Corrida em Esteira',
+    walking: 'Caminhada',
+    hiking: 'Trilha',
+    cycling: 'Ciclismo',
+    road_biking: 'Ciclismo de Estrada',
+    road_cycling: 'Ciclismo de Estrada',
+    mountain_biking: 'Mountain Bike',
+    gravel_cycling: 'Gravel',
+    swimming: 'Natação',
+    strength_training: 'Musculação',
+    cardio_training: 'Cardio',
+    indoor_cycling: 'Ciclismo Indoor',
+    indoor_running: 'Corrida Indoor',
+    pool_swimming: 'Natação (Piscina)',
+  };
+  const key = String(sport || 'Outros').toLowerCase().replace(/[\s-]+/g, '_');
+  return labels[key] || key.replace(/_/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function calculateGlucoseImpactMain(sgvReadings, workoutStart, workoutEnd) {
+  if (!sgvReadings || !sgvReadings.length) return null;
+
+  const hourMs = 60 * 60 * 1000;
+  const startTs = typeof workoutStart === 'object' ? workoutStart.getTime() : workoutStart;
+  const endTs = typeof workoutEnd === 'object' ? workoutEnd.getTime() : workoutEnd;
+
+  const findClosest = (time) => {
+    const targetTs = typeof time === 'object' ? time.getTime() : time;
+    let closest = sgvReadings[0];
+    let minDiff = Math.abs(((typeof closest.timestamp === 'object' ? closest.timestamp.getTime() : closest.timestamp) || 0) - targetTs);
+
+    for (const reading of sgvReadings) {
+      const readingTs = typeof reading.timestamp === 'object' ? reading.timestamp.getTime() : reading.timestamp;
+      const diff = Math.abs(readingTs - targetTs);
+      if (diff < minDiff) {
+        minDiff = diff;
+        closest = reading;
+      }
+    }
+
+    return minDiff < 15 * 60 * 1000 ? closest.glucose : null;
+  };
+
+  const workoutReadings = sgvReadings.filter((reading) => {
+    const readingTs = typeof reading.timestamp === 'object' ? reading.timestamp.getTime() : reading.timestamp;
+    return readingTs >= startTs && readingTs <= endTs;
+  });
+
+  return {
+    preWorkout: findClosest(startTs - hourMs),
+    start: findClosest(startTs),
+    min: workoutReadings.length ? Math.min(...workoutReadings.map((reading) => reading.glucose)) : null,
+    end: findClosest(endTs),
+    postWorkout: findClosest(endTs + hourMs),
+  };
+}
+
+function buildInsulinSummaryMain(workout) {
+  const startTs = workout.workoutStart;
+  const endTs = workout.workoutEnd;
+  const preWorkoutThreshold = startTs - (2 * 60 * 60 * 1000);
+  const postWorkoutThreshold = endTs + (1 * 60 * 60 * 1000);
+  const relevantBolus = (workout.carelink?.bolusEvents || []).filter((bolus) => {
+    const timestamp = typeof bolus.timestamp === 'object' ? bolus.timestamp.getTime() : bolus.timestamp;
+    return timestamp >= preWorkoutThreshold && timestamp <= postWorkoutThreshold;
+  });
+  const basalRate = (workout.carelink?.basalChanges || [])
+    .filter((change) => {
+      const timestamp = typeof change.timestamp === 'object' ? change.timestamp.getTime() : change.timestamp;
+      return timestamp <= startTs;
+    })
+    .slice(-1)[0]?.rate;
+
+  return {
+    displayInsulin: workout.customInsulin ? `${workout.customInsulin} U/h` : formatMetricValueMain(basalRate, ' U/h'),
+    bolus: relevantBolus,
+  };
+}
+
+function buildSvgLinePath(points, getX, getY) {
+  let path = '';
+  let drawing = false;
+  for (const point of points) {
+    const x = getX(point);
+    const y = getY(point);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) {
+      drawing = false;
+      continue;
+    }
+    path += `${drawing ? 'L' : 'M'}${x.toFixed(1)},${y.toFixed(1)} `;
+    drawing = true;
+  }
+  return path.trim();
+}
+
+function downsampleByCount(points, maxPoints) {
+  if (!Array.isArray(points) || points.length <= maxPoints) return points || [];
+  if (maxPoints <= 2) return [points[0], points[points.length - 1]];
+
+  const sampled = [];
+  const step = (points.length - 1) / (maxPoints - 1);
+  let lastIndex = -1;
+
+  for (let i = 0; i < maxPoints; i += 1) {
+    const index = Math.round(i * step);
+    if (index === lastIndex) continue;
+    sampled.push(points[index]);
+    lastIndex = index;
+  }
+
+  if (sampled[sampled.length - 1] !== points[points.length - 1]) {
+    sampled.push(points[points.length - 1]);
+  }
+
+  return sampled;
+}
+
+function buildPrintChartSvg(workout, tags = []) {
+  const clipId = `plot_clip_${String(workout.id || 'workout').replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+  const width = 980;
+  const height = 360;
+  const margin = { top: 42, right: 40, bottom: 28, left: 22 };
+  const plotWidth = width - margin.left - margin.right;
+  const plotHeight = height - margin.top - margin.bottom;
+  const navStart = workout.workoutStart - (60 * 60 * 1000);
+  const navEnd = workout.workoutEnd + (60 * 60 * 1000);
+  const timeSpan = Math.max(1, navEnd - navStart);
+  const glucoseTicks = Array.from(new Set([40, workout.targetLimits?.min ?? 70, workout.targetGoal ?? 100, workout.targetLimits?.max ?? 180, 300])).sort((a, b) => a - b);
+
+  const xScale = (timestamp) => margin.left + (((timestamp - navStart) / timeSpan) * plotWidth);
+  const glucoseY = (value) => margin.top + (((300 - value) / 260) * plotHeight);
+  const heartRateY = (value) => margin.top + (((200 - value) / 140) * plotHeight);
+  const loadY = (value) => margin.top + (((100 - value) / 100) * plotHeight);
+
+  const glucosePoints = downsampleByCount((workout.carelink?.sgvReadings || [])
+    .map((reading) => ({ timestamp: typeof reading.timestamp === 'object' ? reading.timestamp.getTime() : reading.timestamp, value: reading.glucose }))
+    .filter((reading) => reading.timestamp >= navStart && reading.timestamp <= navEnd && Number.isFinite(reading.value)), 160);
+
+  const trackPoints = downsampleByCount((workout.trackpoints || [])
+    .map((point) => ({
+      timestamp: typeof point.timestamp === 'object' ? point.timestamp.getTime() : point.timestamp,
+      pace: point.paceSecondsPerKm ?? null,
+      heartRate: point.heartRate ?? null,
+      relativeLoad: point.relativeLoad ?? null,
+    }))
+    .filter((point) => point.timestamp >= navStart && point.timestamp <= navEnd), 180);
+
+  const paceValues = trackPoints.map((point) => point.pace).filter((value) => Number.isFinite(value));
+  let paceMin = 240;
+  let paceMax = 1080;
+  if (paceValues.length) {
+    paceMin = Math.max(0, Math.floor(Math.min(...paceValues) / 60) * 60);
+    paceMax = Math.min(1080, Math.ceil(Math.max(...paceValues) / 60) * 60);
+    if (paceMax <= paceMin) {
+      paceMax = paceMin + 60;
+    }
+  }
+  const paceY = (value) => margin.top + (((value - paceMin) / (paceMax - paceMin)) * plotHeight);
+
+  const plotBottom = margin.top + plotHeight;
+  const plotRight = margin.left + plotWidth;
+  const xTicks = Array.from({ length: 7 }, (_, index) => navStart + ((timeSpan * index) / 6));
+  const paceTickValues = workout.chartSeries?.pace
+    ? Array.from(new Set([paceMin, Math.round((paceMin + paceMax) / 2 / 60) * 60, paceMax])).sort((a, b) => a - b)
+    : [];
+
+  const labelItems = [];
+  for (const comment of (workout.comments || [])) {
+    const timestamp = typeof comment.timestamp === 'object' ? comment.timestamp.getTime() : comment.timestamp;
+    if (timestamp >= navStart && timestamp <= navEnd) {
+      labelItems.push({ type: 'comment', timestamp, data: comment });
+    }
+  }
+  if (workout.chartSeries?.bolus) {
+    for (const bolus of (workout.carelink?.bolusEvents || [])) {
+      const timestamp = typeof bolus.timestamp === 'object' ? bolus.timestamp.getTime() : bolus.timestamp;
+      if (timestamp >= navStart && timestamp <= navEnd) {
+        labelItems.push({ type: 'bolus', timestamp, data: bolus });
+      }
+    }
+  }
+  labelItems.sort((a, b) => (a.timestamp - b.timestamp) || (a.type === 'bolus' ? -1 : 1));
+  const sampledLabelItems = downsampleByCount(labelItems, 16);
+  const labelPlacements = [];
+  const msPerPixel = timeSpan / plotWidth;
+
+  for (const item of sampledLabelItems) {
+    const rawLabel = item.type === 'bolus'
+      ? `${Number(item.data.volume || 0).toFixed(2).replace(/\.00$/, '').replace(/(\.\d)0$/, '$1')}U`
+      : String(item.data.title || item.data.text || 'Comentário').slice(0, 18);
+    const widthPx = (rawLabel.length * 6) + 12;
+    const widthMs = widthPx * msPerPixel;
+    let level = 0;
+    let collides = true;
+
+    while (collides) {
+      collides = false;
+      for (const previous of labelPlacements) {
+        if (previous.level !== level) continue;
+        if (Math.abs(item.timestamp - previous.timestamp) < Math.max(widthMs, previous.widthMs)) {
+          collides = true;
+          level += 1;
+          break;
+        }
+      }
+    }
+
+    labelPlacements.push({ ...item, label: rawLabel, widthMs, level: Math.min(level, 3) });
+  }
+
+  const backgroundBandTop = glucoseY(workout.targetLimits?.max ?? 180);
+  const backgroundBandHeight = glucoseY(workout.targetLimits?.min ?? 70) - backgroundBandTop;
+
+  const clippedChartLayers = [
+    `<rect x="${margin.left}" y="${backgroundBandTop.toFixed(1)}" width="${plotWidth}" height="${backgroundBandHeight.toFixed(1)}" fill="#38BDF8" opacity="0.08" />`,
+    `<line x1="${margin.left}" y1="${glucoseY(workout.targetGoal ?? 100).toFixed(1)}" x2="${plotRight}" y2="${glucoseY(workout.targetGoal ?? 100).toFixed(1)}" stroke="#2563EB" stroke-width="1.5" stroke-dasharray="4 4" />`,
+  ];
+  const eventLayers = [];
+
+  const glucosePath = buildSvgLinePath(glucosePoints, (point) => xScale(point.timestamp), (point) => glucoseY(point.value));
+  if (glucosePath) {
+    clippedChartLayers.push(`<path d="${glucosePath}" fill="none" stroke="#2563EB" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" />`);
+  }
+
+  if (workout.chartSeries?.relativeLoad) {
+    const loadPath = buildSvgLinePath(
+      trackPoints.filter((point) => Number.isFinite(point.relativeLoad)),
+      (point) => xScale(point.timestamp),
+      (point) => loadY(point.relativeLoad)
+    );
+    if (loadPath) {
+      clippedChartLayers.push(`<path d="${loadPath}" fill="none" stroke="#D97706" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />`);
+    }
+  }
+
+  if (workout.chartSeries?.heartRate) {
+    const heartRatePath = buildSvgLinePath(
+      trackPoints.filter((point) => Number.isFinite(point.heartRate)),
+      (point) => xScale(point.timestamp),
+      (point) => heartRateY(point.heartRate)
+    );
+    if (heartRatePath) {
+      clippedChartLayers.push(`<path d="${heartRatePath}" fill="none" stroke="#F43F5E" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />`);
+    }
+  }
+
+  if (workout.chartSeries?.pace) {
+    const pacePath = buildSvgLinePath(
+      trackPoints.filter((point) => Number.isFinite(point.pace)),
+      (point) => xScale(point.timestamp),
+      (point) => paceY(point.pace)
+    );
+    if (pacePath) {
+      clippedChartLayers.push(`<path d="${pacePath}" fill="none" stroke="#059669" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" />`);
+    }
+  }
+
+  for (const label of labelPlacements) {
+    const x = xScale(label.timestamp);
+    const labelY = Math.max(4, margin.top - 25 + (label.level * 10));
+    if (label.type === 'bolus') {
+      eventLayers.push(`<line x1="${x.toFixed(1)}" y1="${margin.top}" x2="${x.toFixed(1)}" y2="${plotBottom}" stroke="#7C3AED" stroke-width="2" stroke-dasharray="3 3" />`);
+      eventLayers.push(`<text x="${x.toFixed(1)}" y="${labelY.toFixed(1)}" fill="#7C3AED" text-anchor="middle" dominant-baseline="hanging" font-size="10" font-weight="700">${escapeHtml(label.label)}</text>`);
+    } else {
+      const tag = tags.find((item) => item.label === label.data.title);
+      const color = tag?.color || '#F59E0B';
+      eventLayers.push(`<line x1="${x.toFixed(1)}" y1="${margin.top}" x2="${x.toFixed(1)}" y2="${plotBottom}" stroke="${escapeHtml(color)}" stroke-width="2" stroke-dasharray="4 3" />`);
+      eventLayers.push(`<text x="${x.toFixed(1)}" y="${labelY.toFixed(1)}" fill="${escapeHtml(color)}" text-anchor="middle" dominant-baseline="hanging" font-size="9" font-weight="700">${escapeHtml(label.label)}</text>`);
+    }
+  }
+
+  const leftAxis = glucoseTicks.map((tick) => {
+    const y = glucoseY(tick);
+    return `<text x="${margin.left - 6}" y="${(y + 3).toFixed(1)}" fill="#2563EB" font-size="9" text-anchor="end">${tick}</text>`;
+  }).join('');
+
+  const xAxis = xTicks.map((tick) => {
+    const x = xScale(tick);
+    return `
+      <line x1="${x.toFixed(1)}" y1="${plotBottom}" x2="${x.toFixed(1)}" y2="${(plotBottom + 6).toFixed(1)}" stroke="#6B7280" stroke-width="1" />
+      <text x="${x.toFixed(1)}" y="${(plotBottom + 18).toFixed(1)}" fill="#6B7280" font-size="10" text-anchor="middle">${escapeHtml(formatTimeSPMain(tick))}</text>
+    `;
+  }).join('');
+
+  const rightAxis = workout.chartSeries?.pace
+    ? paceTickValues.map((tick) => {
+      const y = paceY(tick);
+      return `<text x="${plotRight + 8}" y="${(y + 3).toFixed(1)}" fill="#059669" font-size="10">${Math.floor(tick / 60)}'</text>`;
+    }).join('')
+    : '';
+
+  return `
+    <svg viewBox="0 0 ${width} ${height}" width="100%" height="100%" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <clipPath id="${clipId}">
+          <rect x="${margin.left}" y="${margin.top}" width="${plotWidth}" height="${plotHeight}" />
+        </clipPath>
+      </defs>
+      <rect x="0" y="0" width="${width}" height="${height}" fill="#FFFFFF"/>
+      <line x1="${margin.left}" y1="${margin.top}" x2="${margin.left}" y2="${plotBottom}" stroke="#2563EB" stroke-width="1.5" />
+      <line x1="${margin.left}" y1="${plotBottom}" x2="${plotRight}" y2="${plotBottom}" stroke="#6B7280" stroke-width="1" />
+      ${workout.chartSeries?.pace ? `<line x1="${plotRight}" y1="${margin.top}" x2="${plotRight}" y2="${plotBottom}" stroke="#059669" stroke-width="1.5" />` : ''}
+      <text x="${margin.left - 2}" y="${margin.top - 12}" fill="#2563EB" font-size="9" text-anchor="start">mg/dL</text>
+      ${leftAxis}
+      ${rightAxis}
+      ${xAxis}
+      <g clip-path="url(#${clipId})">
+        ${clippedChartLayers.join('')}
+      </g>
+      ${eventLayers.join('')}
+    </svg>
+  `;
+}
+
+function buildPrintWorkoutCardHtml(workout, tags) {
+  const glucoseImpact = calculateGlucoseImpactMain(workout.carelink?.sgvReadings || [], workout.workoutStart, workout.workoutEnd);
+  const insulin = buildInsulinSummaryMain(workout);
+  const chartSvg = buildPrintChartSvg(workout, tags);
+
+  const bolusHtml = insulin.bolus.length === 0
+    ? `<p class="empty">Nenhum bolus no período</p>`
+    : insulin.bolus.map((bolus, index) => {
+      const bolusTs = typeof bolus.timestamp === 'object' ? bolus.timestamp.getTime() : bolus.timestamp;
+      const phase = bolusTs > workout.workoutEnd ? 'Pós' : bolusTs >= workout.workoutStart ? 'Durante' : 'Pré';
+      return `
+        <div class="bolus-row" data-index="${index}">
+          <div class="bolus-main">
+            <span class="bolus-volume">${escapeHtml(formatMetricValueMain(bolus.volume, ' U'))}</span>
+            <span class="bolus-meta">${escapeHtml(formatTimeSPMain(bolus.timestamp))} • ${escapeHtml(bolus.type || 'Bolus')}</span>
+          </div>
+          <span class="bolus-phase">${escapeHtml(phase)}</span>
+        </div>
+      `;
+    }).join('');
+
+  const commentsHtml = (workout.comments || []).length === 0
+    ? `<p class="empty">Nenhum comentário</p>`
+    : workout.comments.map((comment) => {
+      const tag = tags.find((item) => item.label === comment.title);
+      const color = tag?.color || '#F59E0B';
+      return `
+        <div class="comment-row">
+          <div class="comment-head">
+            <span class="comment-tag" style="color:${escapeHtml(color)}">${escapeHtml(comment.title || 'Comentário')}</span>
+            <span class="comment-time">${escapeHtml(formatTimeSPMain(comment.timestamp))}</span>
+          </div>
+          <p class="comment-text">${escapeHtml(comment.text || '—')}</p>
+        </div>
+      `;
+    }).join('');
+
+  const metricRow = (label, value) => `
+    <div class="metric-row">
+      <span>${escapeHtml(label)}</span>
+      <span class="metric-value">${escapeHtml(value)}</span>
+    </div>
+  `;
+
+  return `
+    <article class="pdf-card">
+      <header class="card-header">
+        <div>
+          <p class="sport">${escapeHtml(formatSportLabel(workout.sport))}</p>
+          <div class="date-line">
+            <h2>${escapeHtml(formatDayMonthSPMain(workout.date))}</h2>
+            <span class="date-meta">${escapeHtml(formatTimeSPMain(workout.date))}</span>
+          </div>
+        </div>
+        <div class="header-stats">
+          <div>
+            <p class="stat-label">Tempo</p>
+            <p class="stat-value">${escapeHtml(workout.metrics?.duration || '—')}</p>
+          </div>
+          <div>
+            <p class="stat-label">Dist.</p>
+            <p class="stat-value">${escapeHtml(formatMetricValueMain(workout.metrics?.distanceKm, ' km'))}</p>
+          </div>
+        </div>
+      </header>
+
+      <div class="chart-wrap">${chartSvg}</div>
+
+      <div class="stats-grid">
+        <section class="stat-block">
+          <h3>Glicemia</h3>
+          ${metricRow('1h antes', formatMetricValueMain(glucoseImpact?.preWorkout, ' mg/dL'))}
+          ${metricRow('Início', formatMetricValueMain(glucoseImpact?.start, ' mg/dL'))}
+          ${metricRow('Mínima', formatMetricValueMain(glucoseImpact?.min, ' mg/dL'))}
+          ${metricRow('Fim', formatMetricValueMain(glucoseImpact?.end, ' mg/dL'))}
+          ${metricRow('1h depois', formatMetricValueMain(glucoseImpact?.postWorkout, ' mg/dL'))}
+        </section>
+
+        <section class="stat-block">
+          <h3>Treino</h3>
+          ${metricRow('Pace médio', workout.metrics?.avgPace || '—')}
+          ${metricRow('FC média', formatMetricValueMain(workout.metrics?.avgHR, ' bpm'))}
+          ${metricRow('FC máxima', formatMetricValueMain(workout.metrics?.maxHR, ' bpm'))}
+        </section>
+
+        <section class="stat-block">
+          <h3>Insulina</h3>
+          ${metricRow('Insulina ativa', insulin.displayInsulin)}
+          <div class="bolus-list">${bolusHtml}</div>
+        </section>
+      </div>
+
+      <section class="stat-block comments-block">
+        <h3>Comentários</h3>
+        ${commentsHtml}
+      </section>
+    </article>
+  `;
+}
+
+function buildPrintDocumentHtml(payload) {
+  const workouts = Array.isArray(payload.workouts) ? payload.workouts : [];
+  const pages = [];
+  for (let index = 0; index < workouts.length; index += 2) {
+    pages.push(workouts.slice(index, index + 2));
+  }
+
+  const pagesHtml = pages.map((page, pageIndex) => `
+    <section class="pdf-page">
+      <div class="page-content">
+        ${page.map((workout) => buildPrintWorkoutCardHtml(workout, payload.tags || [])).join('')}
+      </div>
+    </section>
+  `).join('');
+
+  return `
+    <!doctype html>
+    <html lang="pt-BR">
+      <head>
+        <meta charset="utf-8" />
+        <title>Exportação PDF</title>
+        <style>
+          @page { size: A4 portrait; margin: 8mm; }
+          * { box-sizing: border-box; }
+          html, body { margin: 0; padding: 0; background: #fff; color: #111827; font-family: "DM Sans", ui-sans-serif, system-ui, sans-serif; }
+          body { padding: 0; }
+          .pdf-page { width: 194mm; min-height: 281mm; margin: 0 auto; padding: 5mm; display: flex; flex-direction: column; gap: 5mm; page-break-after: always; }
+          .pdf-page:last-child { page-break-after: auto; }
+          .page-content { display: flex; flex-direction: column; gap: 5mm; }
+          .pdf-card { display: flex; flex-direction: column; gap: 10px; break-inside: avoid; }
+          .card-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding-bottom: 7px; border-bottom: 1px solid rgba(0,0,0,0.36); }
+          .sport { margin: 0 0 3px; font-size: 10px; font-weight: 800; letter-spacing: 0.16em; text-transform: uppercase; }
+          .date-line { display: flex; align-items: baseline; gap: 8px; }
+          .card-header h2 { margin: 0; font-size: 18px; line-height: 1.1; font-weight: 700; }
+          .date-meta { font-size: 11px; color: rgba(0,0,0,0.7); }
+          .header-stats { display: grid; grid-template-columns: repeat(2, auto); gap: 8px 16px; text-align: right; }
+          .stat-label { margin: 0 0 2px; font-size: 9px; font-weight: 800; letter-spacing: 0.12em; color: rgba(0,0,0,0.7); text-transform: uppercase; }
+          .stat-value { margin: 0; font-size: 14px; font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-weight: 600; }
+          .chart-wrap { height: 315px; width: 100%; }
+          .stats-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; align-items: start; }
+          .stat-block { padding-top: 4px; }
+          .stat-block h3 { margin: 0 0 8px; padding-bottom: 4px; border-bottom: 1px solid rgba(0,0,0,0.36); font-size: 10px; font-weight: 900; letter-spacing: 0.18em; text-transform: uppercase; }
+          .metric-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 0; border-bottom: 1px solid rgba(0,0,0,0.08); font-size: 11px; color: rgba(0,0,0,0.7); }
+          .metric-row:last-child { border-bottom: 0; }
+          .metric-value { color: #111827; font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-weight: 700; text-align: right; }
+          .bolus-list { padding-top: 4px; }
+          .bolus-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 4px 0; border-bottom: 1px solid rgba(0,0,0,0.08); flex-wrap: nowrap; font-family: inherit; }
+          .bolus-row:last-child { border-bottom: 0; }
+          .bolus-main { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1 1 auto; white-space: nowrap; font-family: inherit; }
+          .bolus-volume { font-size: 10px; font-family: inherit; font-weight: 700; color: #111827; white-space: nowrap; }
+          .bolus-meta { font-size: 9px; font-family: inherit; color: rgba(0,0,0,0.7); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 auto; }
+          .bolus-phase { font-size: 9px; font-family: inherit; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: rgba(0,0,0,0.7); white-space: nowrap; flex: 0 0 auto; }
+          .comments-block { padding-top: 0; }
+          .comment-row { padding: 6px 0; border-bottom: 1px solid rgba(0,0,0,0.08); }
+          .comment-row:last-child { border-bottom: 0; }
+          .comment-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; margin-bottom: 4px; }
+          .comment-tag { font-size: 10px; font-weight: 700; }
+          .comment-time { font-size: 10px; font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; color: rgba(0,0,0,0.7); white-space: nowrap; }
+          .comment-text { margin: 0; font-size: 11px; line-height: 1.45; white-space: pre-wrap; color: #111827; }
+          .empty { margin: 0; font-size: 11px; color: rgba(0,0,0,0.6); font-style: italic; }
+        </style>
+      </head>
+      <body>${pagesHtml}</body>
+    </html>
+  `;
+}
+
 // --- Fim Funções Auxiliares ---
 
+function loadRendererTarget(win, query = {}) {
+  if (process.env.VITE_DEV_SERVER_URL) {
+    const url = new URL(process.env.VITE_DEV_SERVER_URL);
+    Object.entries(query).forEach(([key, value]) => {
+      if (value !== undefined && value !== null) {
+        url.searchParams.set(key, String(value));
+      }
+    });
+    return win.loadURL(url.toString());
+  }
+
+  return win.loadFile(path.join(__dirname, '../dist/index.html'), { query });
+}
+
+function isPrintRouteUrl(urlString) {
+  if (!urlString) return false;
+  try {
+    const parsed = new URL(urlString);
+    return parsed.searchParams.get('print') === '1';
+  } catch {
+    return false;
+  }
+}
+
+function restoreMainWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+
+  const currentUrl = mainWindow.webContents.getURL();
+  if (!currentUrl || isPrintRouteUrl(currentUrl)) {
+    loadRendererTarget(mainWindow);
+  }
+
+  if (!mainWindow.isVisible()) {
+    mainWindow.show();
+  }
+
+  mainWindow.focus();
+}
+
 function createWindow() {
-  const win = new BrowserWindow({
+  mainWindow = new BrowserWindow({
     width: 1200,
     height: 800,
-    backgroundColor: '#121212',
+    backgroundColor: '#F8FAFC',
     show: false,
     icon: path.join(__dirname, '../bs&g.png'),
     webPreferences: {
@@ -301,17 +877,82 @@ function createWindow() {
     },
   });
 
-  win.setMenu(null);
+  mainWindow.setMenu(null);
 
-  win.once('ready-to-show', () => {
-    win.show();
+  mainWindow.once('ready-to-show', () => {
+    mainWindow.show();
   });
 
-  if (process.env.VITE_DEV_SERVER_URL) {
-    win.loadURL(process.env.VITE_DEV_SERVER_URL);
-  } else {
-    win.loadFile(path.join(__dirname, '../dist/index.html'));
-  }
+  mainWindow.webContents.on('render-process-gone', () => {
+    restoreMainWindow();
+  });
+
+  mainWindow.on('unresponsive', () => {
+    restoreMainWindow();
+  });
+
+  loadRendererTarget(mainWindow);
+}
+
+function createPrintWindow(printFilePath) {
+  const printWindow = new BrowserWindow({
+    width: 1240,
+    height: 1754,
+    backgroundColor: '#FFFFFF',
+    show: false,
+    paintWhenInitiallyHidden: true,
+    autoHideMenuBar: true,
+    webPreferences: {
+      backgroundThrottling: false,
+    },
+  });
+
+  printWindow.setMenu(null);
+  return printWindow.loadFile(printFilePath).then(() => printWindow);
+}
+
+function waitForPrintWindowReady(printWindow) {
+  return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      printWindow.webContents.removeListener('did-finish-load', handleFinishLoad);
+      printWindow.webContents.removeListener('did-fail-load', handleFailLoad);
+    };
+
+    const handleFinishLoad = () => {
+      cleanup();
+      resolve();
+    };
+
+    const handleFailLoad = (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+      if (!isMainFrame) return;
+      cleanup();
+      reject(new Error(`Falha ao carregar a janela de impressão: ${errorDescription} (${errorCode})`));
+    };
+
+    printWindow.webContents.once('did-finish-load', handleFinishLoad);
+    printWindow.webContents.once('did-fail-load', handleFailLoad);
+
+    if (!printWindow.webContents.isLoadingMainFrame()) {
+      cleanup();
+      resolve();
+    }
+  });
+}
+
+function withTimeout(promise, timeoutMs, message) {
+  let timeoutId;
+  const timeoutPromise = new Promise((_, reject) => {
+    timeoutId = setTimeout(() => {
+      reject(new Error(message));
+    }, timeoutMs);
+  });
+
+  return Promise.race([
+    promise,
+    timeoutPromise,
+  ]).finally(() => {
+    clearTimeout(timeoutId);
+  });
 }
 
 app.whenReady().then(() => {
@@ -576,4 +1217,133 @@ ipcMain.handle('delete-comment', async (event, workoutId, commentId) => {
   return comments;
 });
 
+ipcMain.handle('get-print-job', async (event, jobId) => {
+  const job = printJobs.get(jobId);
+  return job ? job.payload : null;
+});
 
+ipcMain.handle('notify-print-ready', async (event, jobId) => {
+  const job = printJobs.get(jobId);
+  if (!job) return { status: 'missing' };
+  if (job.ready) return { status: 'ok' };
+  job.ready = true;
+  if (job.resolveReady) job.resolveReady();
+  return { status: 'ok' };
+});
+
+ipcMain.handle('export-workouts-pdf', async (event, payload) => {
+  if (!payload || !Array.isArray(payload.workouts) || payload.workouts.length === 0) {
+    return { status: 'error', message: 'Nenhum treino selecionado para exportação.' };
+  }
+
+  const result = await dialog.showSaveDialog({
+    title: 'Exportar PDF',
+    defaultPath: `treinos-${new Date().toISOString().slice(0, 10)}.pdf`,
+    filters: [{ name: 'PDF', extensions: ['pdf'] }],
+  });
+
+  if (result.canceled || !result.filePath) {
+    return { status: 'canceled' };
+  }
+
+  const jobId = `print_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  let printWindow = null;
+  const tempPrintPath = path.join(app.getPath('temp'), `${jobId}.html`);
+  const startedAt = Date.now();
+
+  const logStage = (stage) => {
+    console.log(`[PDF export] ${stage} (${Date.now() - startedAt}ms)`);
+  };
+
+  try {
+    logStage(`preparando dados de ${payload.workouts.length} treino(s)`);
+    const preparedPayload = {
+      ...payload,
+      workouts: payload.workouts.map((workout) => (
+        loadWorkoutForPdfExport(workout, payload.targetLimits, payload.targetGoal)
+      )),
+    };
+
+    logStage('montando HTML');
+    const printHtml = buildPrintDocumentHtml(preparedPayload);
+    fs.writeFileSync(tempPrintPath, printHtml, 'utf-8');
+
+    logStage('abrindo janela de impressão');
+    printWindow = await withTimeout(
+      createPrintWindow(tempPrintPath),
+      15000,
+      'Tempo limite ao abrir a janela de impressão.'
+    );
+
+    logStage('gerando PDF');
+    const pdfBuffer = await withTimeout(
+      printWindow.webContents.printToPDF({
+        pageSize: 'A4',
+        landscape: false,
+        printBackground: true,
+        marginsType: 0,
+        preferCSSPageSize: true,
+      }),
+      90000,
+      'Tempo limite ao gerar o PDF.'
+    );
+
+    logStage('salvando arquivo');
+    fs.writeFileSync(result.filePath, pdfBuffer);
+    logStage('concluído');
+    return { status: 'success', filePath: result.filePath };
+  } catch (error) {
+    console.error('Erro ao exportar PDF:', error);
+    return { status: 'error', message: error?.message || 'Falha ao gerar o PDF.' };
+  } finally {
+    if (printWindow && !printWindow.isDestroyed()) {
+      printWindow.close();
+    }
+    if (fs.existsSync(tempPrintPath)) {
+      try {
+        fs.unlinkSync(tempPrintPath);
+      } catch (unlinkError) {
+        console.error('Erro ao remover HTML temporário do PDF:', unlinkError);
+      }
+    }
+    restoreMainWindow();
+  }
+});
+
+function loadWorkoutForPdfExport(workoutRequest, targetLimits, targetGoal) {
+  const workoutId = workoutRequest.id;
+  const workoutFile = path.join(WORKOUTS_DIR, `garmin_${workoutId}.json`);
+  const carelinkFile = path.join(CARELINK_DIR, `carelink_${workoutId}.json`);
+
+  if (!fs.existsSync(workoutFile)) {
+    throw new Error(`Treino ${workoutId} não encontrado para exportação.`);
+  }
+
+  const workoutData = JSON.parse(fs.readFileSync(workoutFile, 'utf-8'));
+  let carelinkData = { sgvReadings: [], bolusEvents: [], basalChanges: [] };
+  if (fs.existsSync(carelinkFile)) {
+    carelinkData = JSON.parse(fs.readFileSync(carelinkFile, 'utf-8'));
+  }
+
+  return {
+    id: workoutId,
+    sport: workoutRequest.sport || workoutData.sport || 'Atividade',
+    date: workoutRequest.date || workoutData.date,
+    trackpoints: workoutData.trackpoints || [],
+    carelink: carelinkData,
+    metrics: workoutData.metrics || {},
+    workoutStart: workoutData.workoutStart,
+    workoutEnd: workoutData.workoutEnd,
+    comments: readComments(workoutId),
+    customInsulin: workoutRequest.customInsulin || '',
+    chartSeries: workoutRequest.chartSeries || {
+      glucose: true,
+      bolus: true,
+      pace: false,
+      relativeLoad: false,
+      heartRate: false,
+    },
+    targetLimits,
+    targetGoal,
+  };
+}

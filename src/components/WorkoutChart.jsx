@@ -287,7 +287,7 @@ function CommentInputPopup({ pendingComment, submitComment, cancelComment, tags 
   );
 }
 
-const WorkoutChart = React.memo(function WorkoutChart({ data, activeSeries, isDarkMode, targetLimits, targetGoal, comments, commentMode, onCommentModeToggle, onAddComment, tags, onAddTag }) {
+const WorkoutChart = React.memo(function WorkoutChart({ data, activeSeries, isDarkMode, targetLimits, targetGoal, comments, commentMode, onCommentModeToggle, onAddComment, tags, onAddTag, printMode = false }) {
   const [pendingComment, setPendingComment] = useState(null);
   const [viewingComment, setViewingComment] = useState(null);
   const glucoseTicks = useMemo(() => {
@@ -314,10 +314,11 @@ const WorkoutChart = React.memo(function WorkoutChart({ data, activeSeries, isDa
   const workoutCenter = (startTsValue + endTsValue) / 2;
 
   const MIN_ZOOM_MS = 10 * 60 * 1000;
-  const PAN_PADDING_MS = 60 * 60 * 1000;
+  const navigationBeforeMs = 60 * 60 * 1000;
+  const navigationAfterMs = 60 * 60 * 1000;
 
-  const navigationStart = startTsValue - PAN_PADDING_MS;
-  const navigationEnd = endTsValue + PAN_PADDING_MS;
+  const navigationStart = startTsValue - navigationBeforeMs;
+  const navigationEnd = endTsValue + navigationAfterMs;
   const maxZoomMs = navigationEnd - navigationStart;
 
   const clampCenterX = useCallback((centerX, zoomMs) => {
@@ -329,20 +330,26 @@ const WorkoutChart = React.memo(function WorkoutChart({ data, activeSeries, isDa
     return Math.max(minCenter, Math.min(maxCenter, centerX));
   }, [navigationEnd, navigationStart, workoutCenter]);
 
-  const initialZoomMs = Math.max(MIN_ZOOM_MS, Math.min(maxZoomMs, workoutDurationMs + 60 * 60 * 1000));
+  const initialCenter = printMode
+    ? (navigationStart + navigationEnd) / 2
+    : workoutCenter;
+  const initialZoomTarget = printMode
+    ? navigationEnd - navigationStart
+    : workoutDurationMs + 60 * 60 * 1000;
+  const initialZoomMs = Math.max(MIN_ZOOM_MS, Math.min(maxZoomMs, initialZoomTarget));
 
   const [view, setView] = useState({
     zoomMs: initialZoomMs,
-    centerX: clampCenterX(workoutCenter, initialZoomMs)
+    centerX: clampCenterX(initialCenter, initialZoomMs)
   });
 
   // Reset view when workout changes
   useEffect(() => {
     setView({
       zoomMs: initialZoomMs,
-      centerX: clampCenterX(workoutCenter, initialZoomMs)
+      centerX: clampCenterX(initialCenter, initialZoomMs)
     });
-  }, [clampCenterX, initialZoomMs, workoutCenter, workoutStart, workoutEnd]);
+  }, [clampCenterX, initialCenter, initialZoomMs, workoutStart, workoutEnd]);
 
   const [chartWidth, setChartWidth] = useState(0);
 
@@ -518,10 +525,14 @@ const WorkoutChart = React.memo(function WorkoutChart({ data, activeSeries, isDa
           }
         }
       }
-      result.push({ item: currentItem, level, dy: -2 + (level * 14) });
+      result.push({
+        item: currentItem,
+        level,
+        dy: printMode ? 8 + (level * 11) : -2 + (level * 14)
+      });
     }
     return result;
-  }, [comments, activeSeries.bolus, carelink.bolusEvents, view.zoomMs, chartWidth]);
+  }, [comments, activeSeries.bolus, carelink.bolusEvents, view.zoomMs, chartWidth, printMode]);
 
   const xTicks = useMemo(() => {
     const [start, end] = domain;
@@ -635,12 +646,16 @@ const WorkoutChart = React.memo(function WorkoutChart({ data, activeSeries, isDa
   }, [clampCenterX, maxZoomMs]);
 
   const resetView = useCallback(() => {
-    const resetZoomMs = Math.max(MIN_ZOOM_MS, Math.min(maxZoomMs, workoutDurationMs + 60 * 60 * 1000));
-    setView({ zoomMs: resetZoomMs, centerX: clampCenterX(workoutCenter, resetZoomMs) });
-  }, [MIN_ZOOM_MS, clampCenterX, maxZoomMs, workoutDurationMs, workoutCenter]);
+    const resetZoomTarget = printMode
+      ? navigationEnd - navigationStart
+      : workoutDurationMs + 60 * 60 * 1000;
+    const resetZoomMs = Math.max(MIN_ZOOM_MS, Math.min(maxZoomMs, resetZoomTarget));
+    const resetCenter = printMode ? (navigationStart + navigationEnd) / 2 : workoutCenter;
+    setView({ zoomMs: resetZoomMs, centerX: clampCenterX(resetCenter, resetZoomMs) });
+  }, [MIN_ZOOM_MS, clampCenterX, maxZoomMs, navigationEnd, navigationStart, printMode, workoutDurationMs, workoutCenter]);
 
   const onMouseDown = (e) => {
-    if (e.button !== 0) return;
+    if (printMode || e.button !== 0) return;
     if (commentMode) return;
     e.preventDefault();
     dragInfo.current = { isDragging: true, lastX: e.clientX };
@@ -649,11 +664,11 @@ const WorkoutChart = React.memo(function WorkoutChart({ data, activeSeries, isDa
   };
 
   const onChartClick = useCallback((e) => {
-    if (!commentMode || !e?.activeLabel) return;
+    if (printMode || !commentMode || !e?.activeLabel) return;
     const ts = e.activeLabel;
     if (typeof ts !== 'number' || !Number.isFinite(ts)) return;
     setPendingComment({ timestamp: ts });
-  }, [commentMode]);
+  }, [commentMode, printMode]);
 
   const submitComment = useCallback((title, text) => {
     if (!pendingComment) return;
@@ -667,6 +682,7 @@ const WorkoutChart = React.memo(function WorkoutChart({ data, activeSeries, isDa
   }, []);
 
   useEffect(() => {
+    if (printMode) return undefined;
     const handleMouseMove = (e) => {
       if (!dragInfo.current.isDragging) return;
       const dx = e.clientX - dragInfo.current.lastX;
@@ -704,9 +720,10 @@ const WorkoutChart = React.memo(function WorkoutChart({ data, activeSeries, isDa
       window.removeEventListener('mouseup', handleMouseUp);
       if (panRafRef.current) cancelAnimationFrame(panRafRef.current);
     };
-  }, [clampCenterX, setInteracting]);
+  }, [clampCenterX, printMode, setInteracting]);
 
   useEffect(() => {
+    if (printMode) return undefined;
     const el = containerRef.current;
     if (!el) return;
 
@@ -773,7 +790,7 @@ const WorkoutChart = React.memo(function WorkoutChart({ data, activeSeries, isDa
       if (wheelRafRef.current) cancelAnimationFrame(wheelRafRef.current);
       if (zoomInteractionTimeoutRef.current) clearTimeout(zoomInteractionTimeoutRef.current);
     };
-  }, [MIN_ZOOM_MS, clampCenterX, maxZoomMs, setInteracting]);
+  }, [MIN_ZOOM_MS, clampCenterX, maxZoomMs, printMode, setInteracting]);
 
   const xTickFormatter = useMemo(() => {
     const formatter = new Intl.DateTimeFormat('pt-BR', {
@@ -786,39 +803,43 @@ const WorkoutChart = React.memo(function WorkoutChart({ data, activeSeries, isDa
 
   return (
     <div className="flex flex-col h-full min-w-0 select-none">
-      <div className="flex justify-end items-center gap-2 mb-2 px-1">
-        <span className="text-[10px] text-clinical-secondary font-bold uppercase tracking-wider mr-auto">
-          {commentMode ? '🖊️ Clique na timeline para comentar' : 'Arraste para mover lateralmente • Scroll para zoom'}
-        </span>
-        <div className="flex gap-1 bg-clinical-bg p-1 rounded-lg border border-clinical-border">
-          <button
-            onClick={onCommentModeToggle}
-            className={`p-1.5 rounded-md transition-all border ${commentMode
-                ? 'bg-amber-500/15 border-amber-500/40 text-amber-500'
-                : 'border-transparent hover:bg-clinical-card hover:border-clinical-border text-clinical-secondary'
-              }`}
-            title={commentMode ? 'Desativar modo comentário' : 'Ativar modo comentário'}
-          >
-            <MessageSquarePlus size={14} />
-          </button>
-          <div className="w-px h-5 bg-clinical-border self-center" />
-          <button onClick={() => handleZoom(0.75)} className="p-1.5 hover:bg-clinical-card rounded-md transition-all border border-transparent hover:border-clinical-border"><ZoomIn size={14} className="text-clinical-secondary" /></button>
-          <button onClick={() => handleZoom(1.33)} className="p-1.5 hover:bg-clinical-card rounded-md transition-all border border-transparent hover:border-clinical-border"><ZoomOut size={14} className="text-clinical-secondary" /></button>
-          <button onClick={resetView} className="p-1.5 hover:bg-clinical-card rounded-md transition-all border border-transparent hover:border-clinical-border"><Maximize2 size={14} className="text-clinical-secondary" /></button>
+      {!printMode && (
+        <div className="flex justify-end items-center gap-2 mb-2 px-1">
+          <span className="text-[10px] text-clinical-secondary font-bold uppercase tracking-wider mr-auto">
+            {commentMode ? '🖊️ Clique na timeline para comentar' : 'Arraste para mover lateralmente • Scroll para zoom'}
+          </span>
+          <div className="flex gap-1 bg-clinical-bg p-1 rounded-lg border border-clinical-border">
+            <button
+              onClick={onCommentModeToggle}
+              className={`p-1.5 rounded-md transition-all border ${commentMode
+                  ? 'bg-amber-500/15 border-amber-500/40 text-amber-500'
+                  : 'border-transparent hover:bg-clinical-card hover:border-clinical-border text-clinical-secondary'
+                }`}
+              title={commentMode ? 'Desativar modo comentário' : 'Ativar modo comentário'}
+            >
+              <MessageSquarePlus size={14} />
+            </button>
+            <div className="w-px h-5 bg-clinical-border self-center" />
+            <button onClick={() => handleZoom(0.75)} className="p-1.5 hover:bg-clinical-card rounded-md transition-all border border-transparent hover:border-clinical-border"><ZoomIn size={14} className="text-clinical-secondary" /></button>
+            <button onClick={() => handleZoom(1.33)} className="p-1.5 hover:bg-clinical-card rounded-md transition-all border border-transparent hover:border-clinical-border"><ZoomOut size={14} className="text-clinical-secondary" /></button>
+            <button onClick={resetView} className="p-1.5 hover:bg-clinical-card rounded-md transition-all border border-transparent hover:border-clinical-border"><Maximize2 size={14} className="text-clinical-secondary" /></button>
+          </div>
         </div>
-      </div>
+      )}
 
       <div
-        className={`flex-1 min-h-0 min-w-0 relative overflow-hidden ${commentMode ? 'ring-2 ring-amber-500/30 rounded-lg' : ''}`}
+        className={`flex-1 min-h-0 min-w-0 relative overflow-hidden ${!printMode && commentMode ? 'ring-2 ring-amber-500/30 rounded-lg' : ''}`}
         ref={containerRef}
-        onMouseDown={onMouseDown}
-        style={{ cursor: commentMode ? 'crosshair' : 'crosshair' }}
+        onMouseDown={printMode ? undefined : onMouseDown}
+        style={{ cursor: printMode ? 'default' : 'crosshair' }}
       >
         <ResponsiveContainer width="100%" height="100%">
           <ComposedChart
             data={visibleData}
-            margin={{ top: 45, right: activeSeries.pace ? 0 : 35, left: activeSeries.glucose ? 45 : 90, bottom: 20 }}
-            onClick={commentMode ? onChartClick : undefined}
+            margin={printMode
+              ? { top: 8, right: activeSeries.pace ? 6 : 8, left: activeSeries.glucose ? -8 : 4, bottom: 0 }
+              : { top: 45, right: activeSeries.pace ? 0 : 35, left: activeSeries.glucose ? 45 : 90, bottom: 20 }}
+            onClick={!printMode && commentMode ? onChartClick : undefined}
           >
             <XAxis
               dataKey="timestamp"
@@ -830,26 +851,36 @@ const WorkoutChart = React.memo(function WorkoutChart({ data, activeSeries, isDa
               minTickGap={28}
               tickFormatter={xTickFormatter}
               stroke={isDarkMode ? '#9CA3AF' : '#6B7280'}
-              fontSize={10}
+              fontSize={printMode ? 9 : 10}
+              tickMargin={printMode ? 2 : 6}
             />
             <YAxis
               yAxisId="glucose"
               domain={[40, 300]}
-              width={activeSeries.glucose ? 45 : 0}
+              width={activeSeries.glucose ? (printMode ? 28 : 45) : 0}
               stroke={isDarkMode ? '#60A5FA' : '#2563EB'}
-              fontSize={10}
+              fontSize={printMode ? 9 : 10}
               axisLine={activeSeries.glucose}
               tickLine={false}
               tick={activeSeries.glucose}
               ticks={activeSeries.glucose ? glucoseTicks : []}
             >
-              {activeSeries.glucose && <Label value="mg/dL" position="insideLeft" angle={-90} style={{ fill: isDarkMode ? '#60A5FA' : '#2563EB', fontSize: 10 }} />}
+              {activeSeries.glucose && (
+                <Label
+                  value="mg/dL"
+                  position={printMode ? 'insideTopLeft' : 'insideLeft'}
+                  angle={printMode ? 0 : -90}
+                  dx={printMode ? 2 : undefined}
+                  dy={printMode ? -8 : undefined}
+                  style={{ fill: isDarkMode ? '#60A5FA' : '#2563EB', fontSize: printMode ? 8 : 10 }}
+                />
+              )}
             </YAxis>
-            <YAxis yAxisId="hr" orientation="right" domain={[60, 200]} width={0} mirror stroke="#F43F5E" fontSize={10} hide={!activeSeries.heartRate} />
-            <YAxis yAxisId="pace" orientation="right" reversed domain={paceDomain} ticks={paceTicks} width={35} stroke={isDarkMode ? '#34D399' : '#059669'} fontSize={10} tickFormatter={(v) => `${Math.floor(v / 60)}'`} hide={!activeSeries.pace} />
+            <YAxis yAxisId="hr" orientation="right" domain={[60, 200]} width={0} mirror stroke="#F43F5E" fontSize={printMode ? 9 : 10} hide={!activeSeries.heartRate} />
+            <YAxis yAxisId="pace" orientation="right" reversed domain={paceDomain} ticks={paceTicks} width={printMode ? 24 : 35} stroke={isDarkMode ? '#34D399' : '#059669'} fontSize={printMode ? 9 : 10} tickFormatter={(v) => `${Math.floor(v / 60)}'`} hide={!activeSeries.pace} />
             <YAxis yAxisId="load" domain={loadDomain} hide />
 
-            {!isInteracting && (
+            {!isInteracting && !printMode && (
               <Tooltip
                 content={<CustomTooltip activeSeries={activeSeries} dataLookup={visibleDataLookup} seriesData={{ glucoseSeries, trackSeries }} />}
                 isAnimationActive={false}
@@ -879,7 +910,16 @@ const WorkoutChart = React.memo(function WorkoutChart({ data, activeSeries, isDa
                 const b = item.data;
                 return (
                   <ReferenceLine key={`bolus-${index}`} x={item.timestamp} stroke="#7C3AED" strokeWidth={2} strokeDasharray="3 3" yAxisId="glucose">
-                    {!isInteracting && <Label value={`${formatFixed2(b.volume)}U`} position="top" fill={isDarkMode ? '#A78BFA' : '#7C3AED'} fontSize={11} fontWeight="bold" dy={dy} />}
+                    {!isInteracting && (
+                      <Label
+                        value={`${formatFixed2(b.volume)}U`}
+                        position={printMode ? 'insideTop' : 'top'}
+                        fill={isDarkMode ? '#A78BFA' : '#7C3AED'}
+                        fontSize={11}
+                        fontWeight="bold"
+                        dy={dy}
+                      />
+                    )}
                   </ReferenceLine>
                 );
               } else {
@@ -895,9 +935,10 @@ const WorkoutChart = React.memo(function WorkoutChart({ data, activeSeries, isDa
                     strokeWidth={2}
                     strokeDasharray="4 3"
                     yAxisId="glucose"
-                    className="cursor-pointer"
-                    style={{ pointerEvents: 'all' }}
+                    className={printMode ? undefined : 'cursor-pointer'}
+                    style={printMode ? undefined : { pointerEvents: 'all' }}
                     onDoubleClick={(e) => {
+                      if (printMode) return;
                       if (e && e.stopPropagation) e.stopPropagation();
                       setViewingComment(c);
                     }}
@@ -905,7 +946,7 @@ const WorkoutChart = React.memo(function WorkoutChart({ data, activeSeries, isDa
                     {!isInteracting && (
                       <Label
                         value={labelText?.length > 20 ? labelText.slice(0, 20) + '…' : labelText}
-                        position="top"
+                        position={printMode ? 'insideTop' : 'top'}
                         fill={tagColor}
                         fontSize={9}
                         fontWeight="bold"
@@ -917,13 +958,13 @@ const WorkoutChart = React.memo(function WorkoutChart({ data, activeSeries, isDa
               }
             })}
 
-            {pendingComment && (
+            {!printMode && pendingComment && (
               <ReferenceLine x={pendingComment.timestamp} stroke="#F59E0B" strokeWidth={2} yAxisId="glucose" />
             )}
           </ComposedChart>
         </ResponsiveContainer>
 
-        {pendingComment && (
+        {!printMode && pendingComment && (
           <CommentInputPopup
             pendingComment={pendingComment}
             submitComment={submitComment}
@@ -933,7 +974,7 @@ const WorkoutChart = React.memo(function WorkoutChart({ data, activeSeries, isDa
           />
         )}
 
-            {viewingComment && (() => {
+            {!printMode && viewingComment && (() => {
               const tag = tags?.find(t => t.label === viewingComment.title);
               const tagColor = tag ? tag.color : '#F59E0B';
               return (

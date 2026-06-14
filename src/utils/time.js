@@ -34,6 +34,12 @@ const saoPauloDateKeyFormatter = new Intl.DateTimeFormat('en-CA', {
   timeZone: TIMEZONE,
 });
 
+const saoPauloMonthKeyFormatter = new Intl.DateTimeFormat('en-CA', {
+  year: 'numeric',
+  month: '2-digit',
+  timeZone: TIMEZONE,
+});
+
 function toDate(value) {
   return value instanceof Date ? value : new Date(value);
 }
@@ -69,6 +75,15 @@ export function getSaoPauloDateKey(value) {
 
 export function getDateKeyFromDate(date) {
   return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
+}
+
+export function getSaoPauloMonthKey(value) {
+  const date = toDate(value);
+  return saoPauloMonthKeyFormatter.format(date);
+}
+
+export function getMonthKeyFromDate(date) {
+  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}`;
 }
 
 export const APP_TIMEZONE = TIMEZONE;

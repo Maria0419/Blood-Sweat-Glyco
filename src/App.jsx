@@ -7,15 +7,18 @@ import WorkoutSummaryCard from './components/WorkoutSummaryCard';
 import InsulinCard from './components/InsulinCard';
 import CommentsPanel from './components/CommentsPanel';
 import Calendar from './components/Calendar';
+import PdfExportModal from './components/PdfExportModal';
+import PrintExportView from './components/PrintExportView';
 import {
   formatDayMonthSP,
   formatMonthYearSP,
   formatTimeSP,
   getDateKeyFromDate,
   getSaoPauloDateKey,
+  getSaoPauloMonthKey,
 } from './utils/time';
 import { translateSport } from './utils/sports';
-import { Activity, Droplets, Clock, Calendar as CalendarIcon, ChevronLeft, ChevronRight, Menu, ChevronDown, Settings, Watch, Link as LinkIcon, RefreshCw, LogOut, CheckCircle2, AlertCircle, Eye, EyeOff, X, Upload, CheckSquare, Square, Pencil, Trash2 } from 'lucide-react';
+import { Activity, Droplets, Clock, Calendar as CalendarIcon, ChevronLeft, ChevronRight, Menu, ChevronDown, Settings, Watch, Link as LinkIcon, RefreshCw, LogOut, CheckCircle2, AlertCircle, Eye, EyeOff, X, Upload, CheckSquare, Square, Pencil, Trash2, FileText } from 'lucide-react';
 
 function NotificationModal({ notification, onClose }) {
   if (!notification) return null;
@@ -33,6 +36,43 @@ function NotificationModal({ notification, onClose }) {
       </div>
     </div>
   );
+}
+
+function ExportProgressModal({ isOpen }) {
+  if (!isOpen) return null;
+
+  return (
+    <div
+      className="fixed inset-0 bg-black/35 backdrop-blur-sm z-[210] flex items-center justify-center animate-in fade-in duration-200"
+    >
+      <div
+        className="bg-clinical-card rounded-2xl shadow-xl w-full max-w-sm overflow-hidden animate-in zoom-in-95 duration-200 p-6 flex flex-col items-center text-center"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="w-12 h-12 rounded-full flex items-center justify-center mb-4 bg-blue-100 text-blue-600">
+          <RefreshCw size={24} className="animate-spin" />
+        </div>
+        <h3 className="text-lg font-bold text-clinical-text mb-2">Gerando PDF</h3>
+        <p className="text-sm text-clinical-secondary">
+          Preparando o arquivo. Se houver erro, ele aparece automaticamente.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+function withTimeout(promise, timeoutMs, timeoutMessage) {
+  let timeoutId;
+  const timeoutPromise = new Promise((_, reject) => {
+    timeoutId = setTimeout(() => {
+      reject(new Error(timeoutMessage));
+    }, timeoutMs);
+  });
+
+  return Promise.race([
+    promise,
+    timeoutPromise,
+  ]).finally(() => clearTimeout(timeoutId));
 }
 
 function SettingsModal({ isOpen, onClose, onWorkoutsUpdated, isDarkMode, setIsDarkMode, targetLimits, setTargetLimits, targetGoal, setTargetGoal, showNotification, tags, onAddTag, onDeleteTag }) {
@@ -545,7 +585,32 @@ function SettingsModal({ isOpen, onClose, onWorkoutsUpdated, isDarkMode, setIsDa
   );
 }
 
-function App() {
+const EXPORT_SERIES_KEYS = ['pace', 'relativeLoad', 'heartRate'];
+
+function sportSupportsPace(sport) {
+  const sportKey = (sport || '').toLowerCase();
+  return [
+    'running',
+    'treadmill_running',
+    'indoor_running',
+    'trail_running',
+    'track_running',
+    'ultra_run',
+    'street_running',
+    'walking',
+    'indoor_walking',
+    'speed_walking',
+    'hiking',
+    'cycling',
+    'road_biking',
+    'road_cycling',
+    'mountain_biking',
+    'gravel_cycling',
+    'indoor_cycling',
+  ].includes(sportKey);
+}
+
+function MainApp() {
   const [workouts, setWorkouts] = useState([]);
   const [selectedWorkoutId, setSelectedWorkoutId] = useState(null);
   const [data, setData] = useState(null);
@@ -581,6 +646,20 @@ function App() {
     return saved ? JSON.parse(saved) : {};
   });
   const [notification, setNotification] = useState(null);
+  const [selectedWorkoutIds, setSelectedWorkoutIds] = useState([]);
+  const [isExportModalOpen, setIsExportModalOpen] = useState(false);
+  const [isExportButtonOpening, setIsExportButtonOpening] = useState(false);
+  const [isExportingPdf, setIsExportingPdf] = useState(false);
+  const [isExportProgressOpen, setIsExportProgressOpen] = useState(false);
+  const [exportFilterDate, setExportFilterDate] = useState('');
+  const [exportFilterMonth, setExportFilterMonth] = useState('');
+  const [exportSportFilters, setExportSportFilters] = useState([]);
+  const [exportGlobalSeries, setExportGlobalSeries] = useState({
+    pace: true,
+    relativeLoad: false,
+    heartRate: false,
+  });
+  const [exportSeriesOverrides, setExportSeriesOverrides] = useState({});
 
   const showNotification = (title, message, type = 'success') => {
     setNotification({ title, message, type });
@@ -683,8 +762,7 @@ useEffect(() => {
 
     const workoutInfo = workouts.find(w => w.id === selectedWorkoutId);
     if (workoutInfo) {
-      const sportKey = (workoutInfo.sport || '').toLowerCase();
-      const hasPace = ['running', 'treadmill_running', 'indoor_running', 'trail_running', 'track_running', 'ultra_run', 'street_running', 'walking', 'indoor_walking', 'speed_walking', 'hiking', 'cycling', 'road_biking', 'road_cycling', 'mountain_biking', 'gravel_cycling', 'indoor_cycling'].includes(sportKey);
+      const hasPace = sportSupportsPace(workoutInfo.sport);
       setActiveSeries(prev => ({
         ...prev,
         pace: hasPace,
@@ -733,25 +811,41 @@ useEffect(() => {
     return Array.from(sports).sort();
   }, [workouts]);
 
-  const groupedWorkouts = useMemo(() => {
+  const availableMonths = useMemo(() => {
+    const months = new Map();
+    workouts.forEach((workout) => {
+      const monthKey = getSaoPauloMonthKey(workout.date);
+      if (!months.has(monthKey)) {
+        months.set(monthKey, formatMonthYearSP(workout.date));
+      }
+    });
+    return Array.from(months.entries())
+      .sort((a, b) => b[0].localeCompare(a[0]))
+      .map(([value, label]) => ({ value, label }));
+  }, [workouts]);
+
+  const filteredWorkouts = useMemo(() => {
     const selectedDateKey = filterDate ? getDateKeyFromDate(filterDate) : null;
-    
+
     let filtered = workouts;
-    
-    // Filtro de Data
+
     if (selectedDateKey) {
       filtered = filtered.filter(w => getSaoPauloDateKey(w.date) === selectedDateKey);
     }
-    
-    // Filtro de Esporte
+
     if (sportFilters.length > 0) {
       filtered = filtered.filter(w => sportFilters.includes(translateSport(w.sport)));
     }
 
+    return filtered;
+  }, [workouts, filterDate, sportFilters]);
+
+  const groupedWorkouts = useMemo(() => {
+
     const groups = [];
-    filtered.forEach(w => {
+    filteredWorkouts.forEach(w => {
       const monthLabel = formatMonthYearSP(w.date);
-      
+
       let group = groups.find(g => g.label === monthLabel);
       if (!group) {
         group = { label: monthLabel, items: [] };
@@ -760,7 +854,189 @@ useEffect(() => {
       group.items.push(w);
     });
     return groups;
-  }, [workouts, filterDate, sportFilters]);
+  }, [filteredWorkouts]);
+
+  const exportFilteredWorkouts = useMemo(() => {
+    let filtered = workouts;
+
+    if (exportFilterDate) {
+      filtered = filtered.filter((workout) => getSaoPauloDateKey(workout.date) === exportFilterDate);
+    }
+
+    if (exportFilterMonth) {
+      filtered = filtered.filter((workout) => getSaoPauloMonthKey(workout.date) === exportFilterMonth);
+    }
+
+    if (exportSportFilters.length > 0) {
+      filtered = filtered.filter((workout) => exportSportFilters.includes(translateSport(workout.sport)));
+    }
+
+    return filtered;
+  }, [exportFilterDate, exportFilterMonth, exportSportFilters, workouts]);
+
+  const exportCalendarWorkouts = useMemo(() => {
+    let filtered = workouts;
+
+    if (exportFilterMonth) {
+      filtered = filtered.filter((workout) => getSaoPauloMonthKey(workout.date) === exportFilterMonth);
+    }
+
+    if (exportSportFilters.length > 0) {
+      filtered = filtered.filter((workout) => exportSportFilters.includes(translateSport(workout.sport)));
+    }
+
+    return filtered;
+  }, [exportFilterMonth, exportSportFilters, workouts]);
+
+  const exportFilteredWorkoutIds = useMemo(
+    () => new Set(exportFilteredWorkouts.map((workout) => workout.id)),
+    [exportFilteredWorkouts]
+  );
+
+  const selectedExportWorkoutIds = useMemo(() => (
+    selectedWorkoutIds.filter((workoutId) => exportFilteredWorkoutIds.has(workoutId))
+  ), [selectedWorkoutIds, exportFilteredWorkoutIds]);
+
+  const workoutsForExport = useMemo(() => (
+    selectedExportWorkoutIds.length > 0
+      ? exportFilteredWorkouts.filter((workout) => selectedExportWorkoutIds.includes(workout.id))
+      : exportFilteredWorkouts
+  ), [exportFilteredWorkouts, selectedExportWorkoutIds]);
+
+  const toggleWorkoutSelection = useCallback((workoutId) => {
+    setSelectedWorkoutIds((prev) => (
+      prev.includes(workoutId)
+        ? prev.filter((id) => id !== workoutId)
+        : [...prev, workoutId]
+    ));
+  }, []);
+
+  const openExportModal = useCallback(() => {
+    if (workouts.length === 0 || isExportButtonOpening) return;
+    setIsExportButtonOpening(true);
+    window.setTimeout(() => {
+      setIsExportModalOpen(true);
+      setIsExportButtonOpening(false);
+    }, 80);
+  }, [isExportButtonOpening, workouts.length]);
+
+  const handleExportDateFilterChange = useCallback((value) => {
+    setExportFilterDate(value);
+    if (value) {
+      setExportFilterMonth('');
+    }
+  }, []);
+
+  const handleExportMonthFilterChange = useCallback((value) => {
+    setExportFilterMonth(value);
+    if (value) {
+      setExportFilterDate('');
+    }
+  }, []);
+
+  const clearExportOverride = useCallback((workoutId) => {
+    setExportSeriesOverrides((prev) => {
+      if (!prev[workoutId]) return prev;
+      const next = { ...prev };
+      delete next[workoutId];
+      return next;
+    });
+  }, []);
+
+  const toggleExportOverride = useCallback((workoutId, key) => {
+    setExportSeriesOverrides((prev) => {
+      const base = prev[workoutId] || exportGlobalSeries;
+      const nextOverride = {
+        pace: !!base.pace,
+        relativeLoad: !!base.relativeLoad,
+        heartRate: !!base.heartRate,
+        [key]: !base[key],
+      };
+      return { ...prev, [workoutId]: nextOverride };
+    });
+  }, [exportGlobalSeries]);
+
+  const toggleExportGlobalSeries = useCallback((key) => {
+    setExportGlobalSeries((prev) => ({ ...prev, [key]: !prev[key] }));
+  }, []);
+
+  const handleExportPdf = useCallback(async () => {
+    if (workoutsForExport.length === 0) {
+      showNotification('Nada para exportar', 'Selecione ou filtre pelo menos um treino.', 'error');
+      return;
+    }
+
+    setIsExportModalOpen(false);
+    setIsExportProgressOpen(true);
+    setIsExportingPdf(true);
+    try {
+      const exportRequestWorkouts = workoutsForExport.map((workout) => {
+        const chartSeries = exportSeriesOverrides[workout.id] || exportGlobalSeries;
+
+        return {
+          id: workout.id,
+          sport: workout.sport,
+          date: workout.date,
+          customInsulin: customInsulin[workout.id] || '',
+          chartSeries: {
+            glucose: true,
+            bolus: true,
+            pace: !!chartSeries.pace,
+            relativeLoad: !!chartSeries.relativeLoad,
+            heartRate: !!chartSeries.heartRate,
+          },
+        };
+      });
+
+      const result = await withTimeout(
+        window.electronAPI.exportWorkoutsPdf({
+          workouts: exportRequestWorkouts,
+          tags,
+          targetLimits,
+          targetGoal,
+          filtersSnapshot: {
+            dateKey: exportFilterDate || null,
+            monthKey: exportFilterMonth || null,
+            monthLabel: exportFilterMonth
+              ? availableMonths.find((month) => month.value === exportFilterMonth)?.label || exportFilterMonth
+              : null,
+            sports: exportSportFilters,
+          },
+        }),
+        120000,
+        'A geração do PDF demorou além do esperado. Tente novamente.'
+      );
+
+      if (result.status === 'success') {
+        showNotification('PDF exportado', 'O arquivo foi gerado com sucesso.');
+      } else if (result.status === 'error') {
+        showNotification('Falha na exportação', result.message || 'Não foi possível gerar o PDF.', 'error');
+      }
+    } catch (error) {
+      console.error('Erro ao preparar exportação:', error);
+      showNotification('Falha na exportação', error?.message || 'Não foi possível preparar os dados do PDF.', 'error');
+    } finally {
+      setIsExportingPdf(false);
+      setIsExportProgressOpen(false);
+    }
+  }, [
+    availableMonths,
+    customInsulin,
+    exportGlobalSeries,
+    exportFilterDate,
+    exportFilterMonth,
+    exportSportFilters,
+    exportSeriesOverrides,
+    tags,
+    targetGoal,
+    targetLimits,
+    workoutsForExport,
+  ]);
+
+  useEffect(() => {
+    const workoutIdSet = new Set(workouts.map((workout) => workout.id));
+    setSelectedWorkoutIds((prev) => prev.filter((workoutId) => workoutIdSet.has(workoutId)));
+  }, [workouts]);
 
   if (loading) return (
     <div className="flex items-center justify-center h-screen bg-clinical-bg"><Clock className="animate-spin text-clinical-primary" /></div>
@@ -791,6 +1067,22 @@ useEffect(() => {
           </div>
           
           <div className="flex-1 overflow-y-auto p-4 scrollbar-stable">
+            <div className="px-2 mb-4">
+              <button
+                type="button"
+                onClick={openExportModal}
+                disabled={workouts.length === 0 || isExportButtonOpening}
+                className={`w-full flex items-center justify-center gap-2 px-3 py-2.5 rounded-xl text-white text-[11px] font-black uppercase tracking-wider shadow-sm disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-150 focus:outline-none focus:ring-2 focus:ring-clinical-primary/40 focus:ring-offset-2 focus:ring-offset-clinical-bg active:scale-[0.98] ${
+                  isExportButtonOpening
+                    ? 'bg-clinical-primary/80 shadow-inner'
+                    : 'bg-clinical-primary hover:bg-clinical-primary/90 hover:shadow-md'
+                }`}
+              >
+                <FileText size={14} className={isExportButtonOpening ? 'animate-pulse' : ''} />
+                {isExportButtonOpening ? 'Abrindo...' : 'Exportar PDF'}
+              </button>
+            </div>
+
             <div className="mb-4">
               <button 
                 onClick={() => setIsCalendarExpanded(!isCalendarExpanded)}
@@ -872,6 +1164,7 @@ useEffect(() => {
                   </div>
                 )}
               </div>
+
             </div>
 
             <div className="space-y-6">
@@ -893,28 +1186,30 @@ useEffect(() => {
                     </button>
                     <div className={`space-y-1 overflow-hidden transition-all duration-300 ease-in-out ${collapsedGroups[group.label] ? 'max-h-0 opacity-0' : 'max-h-[2000px] opacity-100'}`}>
                       {group.items.map((w) => (
-                        <button
+                        <div
                           key={w.id}
                           onClick={() => setSelectedWorkoutId(w.id)}
-                          className={`w-full flex flex-col gap-0.5 px-3 py-3 rounded-xl text-left transition-all ${
+                          className={`w-full flex items-start gap-3 px-3 py-3 rounded-xl text-left transition-all cursor-pointer ${
                             selectedWorkoutId === w.id 
                               ? 'bg-clinical-primary text-white shadow-md' 
                               : 'text-clinical-secondary hover:bg-clinical-bg'
                           }`}
                         >
-                          <div className="flex items-center justify-between w-full">
-                            <p className={`text-[10px] font-black uppercase tracking-widest ${selectedWorkoutId === w.id ? 'text-white/80' : 'text-clinical-primary'}`}>
-                              {translateSport(w.sport)}
+                          <div className="flex-1 min-w-0 flex flex-col gap-0.5">
+                            <div className="flex items-center justify-between w-full">
+                              <p className={`text-[10px] font-black uppercase tracking-widest ${selectedWorkoutId === w.id ? 'text-white/80' : 'text-clinical-primary'}`}>
+                                {translateSport(w.sport)}
+                              </p>
+                              <Clock size={12} className={selectedWorkoutId === w.id ? 'text-white/60' : 'text-clinical-secondary'} />
+                            </div>
+                            <p className="text-sm font-bold leading-tight text-clinical-text">
+                              {formatDayMonthSP(w.date)}
                             </p>
-                            <Clock size={12} className={selectedWorkoutId === w.id ? 'text-white/60' : 'text-clinical-secondary'} />
+                            <p className={`text-[10px] font-medium ${selectedWorkoutId === w.id ? 'text-white/60' : 'text-clinical-secondary/70'}`}>
+                              {formatTimeSP(w.date)}
+                            </p>
                           </div>
-                          <p className="text-sm font-bold leading-tight text-clinical-text">
-                            {formatDayMonthSP(w.date)}
-                          </p>
-                          <p className={`text-[10px] font-medium ${selectedWorkoutId === w.id ? 'text-white/60' : 'text-clinical-secondary/70'}`}>
-                            {formatTimeSP(w.date)}
-                          </p>
-                        </button>
+                        </div>
                       ))}
                     </div>
                   </div>
@@ -988,6 +1283,49 @@ useEffect(() => {
         }}
       />
 
+      <PdfExportModal
+        isOpen={isExportModalOpen}
+        onClose={() => !isExportingPdf && setIsExportModalOpen(false)}
+        filteredWorkouts={exportFilteredWorkouts}
+        calendarWorkouts={exportCalendarWorkouts}
+        availableMonths={availableMonths}
+        availableSports={availableSports}
+        exportFilterDate={exportFilterDate}
+        exportFilterMonth={exportFilterMonth}
+        exportSportFilters={exportSportFilters}
+        onExportDateChange={handleExportDateFilterChange}
+        onExportMonthChange={handleExportMonthFilterChange}
+        onToggleExportSport={(sport) => {
+          setExportSportFilters((prev) => (
+            prev.includes(sport)
+              ? prev.filter((item) => item !== sport)
+              : [...prev, sport]
+          ));
+        }}
+        onClearExportFilters={() => {
+          setExportFilterDate('');
+          setExportFilterMonth('');
+          setExportSportFilters([]);
+        }}
+        effectiveWorkouts={workoutsForExport}
+        selectedFilteredCount={selectedExportWorkoutIds.length}
+        selectedWorkoutIds={selectedWorkoutIds}
+        onSelectAll={() => setSelectedWorkoutIds(exportFilteredWorkouts.map((workout) => workout.id))}
+        onClearSelection={() => setSelectedWorkoutIds([])}
+        onToggleWorkoutSelection={toggleWorkoutSelection}
+        globalSeries={exportGlobalSeries}
+        overrides={exportSeriesOverrides}
+        onToggleGlobal={toggleExportGlobalSeries}
+        onToggleOverride={toggleExportOverride}
+        onClearOverride={clearExportOverride}
+        onExport={handleExportPdf}
+        isExporting={isExportingPdf}
+      />
+
+      <ExportProgressModal
+        isOpen={isExportProgressOpen}
+      />
+
       <NotificationModal notification={notification} onClose={() => setNotification(null)} />
 
       {/* Botão de abrir sidebar quando fechada */}
@@ -1032,9 +1370,11 @@ useEffect(() => {
                 </h1>
                 <p className="text-[10px] text-clinical-secondary uppercase tracking-widest font-bold">Análise Detalhada • Garmin Venu 3S</p>
               </div>
-              <div className="flex gap-8">
+              <div className="flex items-center gap-3">
+                <div className="flex gap-8">
                 <HeaderStat label="Duração" value={data.metrics.duration} />
                 <HeaderStat label="Distância" value={`${data.metrics.distanceKm} km`} />
+                </div>
               </div>
             </header>
 
@@ -1138,4 +1478,7 @@ function HeaderStat({ label, value }) {
   );
 }
 
-export default App;
+export default function App() {
+  const isPrintMode = typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('print') === '1';
+  return isPrintMode ? <PrintExportView /> : <MainApp />;
+}

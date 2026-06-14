@@ -2,7 +2,7 @@ import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { ChevronLeft, ChevronRight, Calendar as CalendarIcon, Activity, Clock, Droplets, ChevronDown } from 'lucide-react';
 import { getDateKeyFromDate, getSaoPauloDateKey } from '../utils/time';
 
-const Calendar = React.memo(({ workouts, onSelectDate, selectedDate }) => {
+const Calendar = React.memo(({ workouts, onSelectDate, selectedDate, visibleMonthKey = '' }) => {
   const [currentMonth, setCurrentMonth] = useState(new Date());
   const [showMonthDropdown, setShowMonthDropdown] = useState(false);
   const [showYearDropdown, setShowYearDropdown] = useState(false);
@@ -17,6 +17,18 @@ const Calendar = React.memo(({ workouts, onSelectDate, selectedDate }) => {
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
+
+  useEffect(() => {
+    if (!visibleMonthKey) return;
+    const [year, month] = visibleMonthKey.split('-').map(Number);
+    if (!year || !month) return;
+    setCurrentMonth(new Date(year, month - 1, 1));
+  }, [visibleMonthKey]);
+
+  useEffect(() => {
+    if (!selectedDate) return;
+    setCurrentMonth(new Date(selectedDate.getFullYear(), selectedDate.getMonth(), 1));
+  }, [selectedDate]);
 
   const daysInMonth = useMemo(() => {
     const year = currentMonth.getFullYear();

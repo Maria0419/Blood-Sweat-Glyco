@@ -3,6 +3,9 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('electronAPI', {
   listWorkouts: () => ipcRenderer.invoke('list-workouts'),
   loadWorkout: (fileName) => ipcRenderer.invoke('load-workout', fileName),
+  exportWorkoutsPdf: (payload) => ipcRenderer.invoke('export-workouts-pdf', payload),
+  getPrintJob: (jobId) => ipcRenderer.invoke('get-print-job', jobId),
+  notifyPrintReady: (jobId) => ipcRenderer.invoke('notify-print-ready', jobId),
   
   checkGarminAuth: () => ipcRenderer.invoke('check-garmin-auth'),
   connectGarmin: (email, password) => ipcRenderer.invoke('connect-garmin', email, password),
