@@ -51,6 +51,8 @@ function processTCXtoOptimizedJSON(tcxString, activityId, sportFromGarmin = null
 
   const activity = result.TrainingCenterDatabase.Activities.Activity;
   const laps = Array.isArray(activity.Lap) ? activity.Lap : [activity.Lap];
+  const lapTotalTimeSeconds = laps.reduce((sum, lap) => sum + (parseFloat(lap.TotalTimeSeconds) || 0), 0);
+  const lapTotalDistance = laps.reduce((sum, lap) => sum + (parseFloat(lap.DistanceMeters) || 0), 0);
   
   let allTrackpoints = [];
   const MAX_HR = 200;
@@ -79,6 +81,8 @@ function processTCXtoOptimizedJSON(tcxString, activityId, sportFromGarmin = null
     });
   });
 
+  allTrackpoints.sort((a, b) => a.timestamp - b.timestamp);
+
   const intervalMs = 10 * 1000;
   const downsampled = [];
   let lastTimestamp = null;
@@ -90,6 +94,12 @@ function processTCXtoOptimizedJSON(tcxString, activityId, sportFromGarmin = null
   }
 
   if (downsampled.length === 0) throw new Error("Treino sem trackpoints úteis.");
+
+  const lastTrackpoint = allTrackpoints[allTrackpoints.length - 1];
+  const lastDownsampled = downsampled[downsampled.length - 1];
+  if (lastTrackpoint && lastDownsampled && lastTrackpoint.timestamp !== lastDownsampled.timestamp) {
+    downsampled.push(lastTrackpoint);
+  }
 
   // --- Filtro de Pico de Pace Inicial (GPS Lock) ---
   let firstValidPaceTs = null;
@@ -115,12 +125,14 @@ function processTCXtoOptimizedJSON(tcxString, activityId, sportFromGarmin = null
   }
   // --- Fim do Filtro ---
 
-  const workoutStart = downsampled[0].timestamp;
-  const workoutEnd = downsampled[downsampled.length - 1].timestamp;
+  const workoutStart = allTrackpoints[0].timestamp;
+  const workoutEnd = allTrackpoints[allTrackpoints.length - 1].timestamp;
   
-  // Cálculo de Métricas (Fix para Undefined)
-  const totalTimeSeconds = (workoutEnd - workoutStart) / 1000;
-  const totalDistance = downsampled[downsampled.length - 1].distanceMeters;
+  // Usa os totais oficiais das voltas do Garmin para evitar perder tempo/distância no downsample.
+  const trackpointTimeSeconds = (workoutEnd - workoutStart) / 1000;
+  const trackpointDistance = allTrackpoints[allTrackpoints.length - 1].distanceMeters;
+  const totalTimeSeconds = lapTotalTimeSeconds > 0 ? lapTotalTimeSeconds : trackpointTimeSeconds;
+  const totalDistance = lapTotalDistance > 0 ? lapTotalDistance : trackpointDistance;
   
   const heartRates = downsampled.map(tp => tp.heartRate).filter(hr => hr !== null);
   const avgHR = heartRates.length ? heartRates.reduce((a, b) => a + b, 0) / heartRates.length : 0;
@@ -140,6 +152,7 @@ function processTCXtoOptimizedJSON(tcxString, activityId, sportFromGarmin = null
 
   return {
     id: activityId,
+    importVersion: 2,
     sport: sportFromGarmin || activity['@_Sport'] || 'Atividade',
     date: new Date(workoutStart).toISOString(),
     workoutStart,
@@ -366,33 +379,38 @@ function calculateGlucoseImpactMain(sgvReadings, workoutStart, workoutEnd) {
   const hourMs = 60 * 60 * 1000;
   const startTs = typeof workoutStart === 'object' ? workoutStart.getTime() : workoutStart;
   const endTs = typeof workoutEnd === 'object' ? workoutEnd.getTime() : workoutEnd;
+  const normalizedReadings = sgvReadings
+    .map((reading) => ({
+      ...reading,
+      timestamp: typeof reading.timestamp === 'object' ? reading.timestamp.getTime() : reading.timestamp,
+    }))
+    .filter((reading) => Number.isFinite(reading.timestamp) && Number.isFinite(reading.glucose))
+    .sort((a, b) => a.timestamp - b.timestamp);
 
   const findClosest = (time) => {
     const targetTs = typeof time === 'object' ? time.getTime() : time;
-    let closest = sgvReadings[0];
-    let minDiff = Math.abs(((typeof closest.timestamp === 'object' ? closest.timestamp.getTime() : closest.timestamp) || 0) - targetTs);
+    let closest = normalizedReadings[0];
+    let minDiff = Math.abs((closest?.timestamp ?? 0) - targetTs);
 
-    for (const reading of sgvReadings) {
-      const readingTs = typeof reading.timestamp === 'object' ? reading.timestamp.getTime() : reading.timestamp;
-      const diff = Math.abs(readingTs - targetTs);
+    for (const reading of normalizedReadings) {
+      const diff = Math.abs(reading.timestamp - targetTs);
       if (diff < minDiff) {
         minDiff = diff;
         closest = reading;
       }
     }
 
-    return minDiff < 15 * 60 * 1000 ? closest.glucose : null;
+    return minDiff < 15 * 60 * 1000 ? closest?.glucose ?? null : null;
   };
 
-  const workoutReadings = sgvReadings.filter((reading) => {
-    const readingTs = typeof reading.timestamp === 'object' ? reading.timestamp.getTime() : reading.timestamp;
-    return readingTs >= startTs && readingTs <= endTs;
-  });
+  const workoutGlucoseValues = normalizedReadings
+    .filter((reading) => reading.timestamp >= startTs && reading.timestamp <= endTs)
+    .map((reading) => reading.glucose);
 
   return {
     preWorkout: findClosest(startTs - hourMs),
     start: findClosest(startTs),
-    min: workoutReadings.length ? Math.min(...workoutReadings.map((reading) => reading.glucose)) : null,
+    min: workoutGlucoseValues.length ? Math.round(Math.min(...workoutGlucoseValues)) : null,
     end: findClosest(endTs),
     postWorkout: findClosest(endTs + hourMs),
   };
@@ -1082,11 +1100,11 @@ ipcMain.handle('sync-garmin', async () => {
       const activityId = activity.activityId.toString();
       const finalJsonPath = path.join(WORKOUTS_DIR, `garmin_${activityId}.json`);
       
-      // Forçar re-processamento se as métricas estiverem faltando no JSON existente
+      // Forçar re-processamento se o JSON existente ainda usa métricas calculadas pelos trackpoints reduzidos.
       let shouldProcess = !fs.existsSync(finalJsonPath);
       if (!shouldProcess) {
         const existing = JSON.parse(fs.readFileSync(finalJsonPath, 'utf-8'));
-        if (!existing.metrics || existing.metrics.avgHR === undefined) {
+        if (!existing.metrics || existing.metrics.avgHR === undefined || existing.importVersion !== 2) {
           shouldProcess = true;
         }
       }

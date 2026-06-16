@@ -49,33 +49,38 @@ export function calculateGlucoseImpact(sgvReadings, workoutStart, workoutEnd) {
   const hourMs = 60 * 60 * 1000;
   const startTs = typeof workoutStart === 'object' ? workoutStart.getTime() : workoutStart;
   const endTs = typeof workoutEnd === 'object' ? workoutEnd.getTime() : workoutEnd;
+  const normalizedReadings = sgvReadings
+    .map(r => ({
+      ...r,
+      timestamp: typeof r.timestamp === 'object' ? r.timestamp.getTime() : r.timestamp,
+    }))
+    .filter(r => Number.isFinite(r.timestamp) && Number.isFinite(r.glucose))
+    .sort((a, b) => a.timestamp - b.timestamp);
   
   const findClosest = (time) => {
-    let closest = sgvReadings[0];
     const targetTs = typeof time === 'object' ? time.getTime() : time;
-    let minDiff = Math.abs((typeof sgvReadings[0].timestamp === 'object' ? sgvReadings[0].timestamp.getTime() : sgvReadings[0].timestamp) - targetTs);
+    let closest = normalizedReadings[0];
+    let minDiff = Math.abs((closest?.timestamp ?? 0) - targetTs);
     
-    for (const r of sgvReadings) {
-      const rTs = typeof r.timestamp === 'object' ? r.timestamp.getTime() : r.timestamp;
-      const diff = Math.abs(rTs - targetTs);
+    for (const r of normalizedReadings) {
+      const diff = Math.abs(r.timestamp - targetTs);
       if (diff < minDiff) {
         minDiff = diff;
         closest = r;
       }
     }
-    return minDiff < 15 * 60 * 1000 ? closest.glucose : null; // Limite de 15 min
+    return minDiff < 15 * 60 * 1000 ? closest?.glucose ?? null : null; // Limite de 15 min
   };
-  
+
   const startGlucose = findClosest(startTs);
   const endGlucose = findClosest(endTs);
   const preGlucose = findClosest(startTs - hourMs);
   const postGlucose = findClosest(endTs + hourMs);
   
-  const workoutReadings = sgvReadings.filter(r => {
-    const rTs = typeof r.timestamp === 'object' ? r.timestamp.getTime() : r.timestamp;
-    return rTs >= startTs && rTs <= endTs;
-  });
-  const minGlucose = workoutReadings.length ? Math.min(...workoutReadings.map(r => r.glucose)) : null;
+  const workoutGlucoseValues = normalizedReadings
+    .filter(r => r.timestamp >= startTs && r.timestamp <= endTs)
+    .map(r => r.glucose);
+  const minGlucose = workoutGlucoseValues.length ? Math.round(Math.min(...workoutGlucoseValues)) : null;
   
   return {
     preWorkout: preGlucose,
